@@ -5,6 +5,10 @@ import torch
 import random
 import numpy as np
 import pygame
+from functools import partial
+
+# 强制禁用缓冲，让终端实时打印，专门治 conda 进程假死
+print = partial(print, flush=True)
 
 # 添加搜索路径，确保能 import env 和自定义算法
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -128,10 +132,16 @@ def main():
                 ep_reward += reward_rl
                 step_in_ep += 1
 
+                # 同步输出步数进度，防止长时间无响应让用户误以为死机
+                if step_in_ep % 500 == 0 and not done:
+                    print(f"  ...[游戏中] 奔跑步数: {step_in_ep}/3000 | 实时 Reward: {ep_reward:.1f} | 动作力矩: {computed_force:.0f}, 转向: {computed_angle:.1f}")
+
             # 【防卡顿】: 将反向传播更新移动到本局结束之后！
             # 这样就不会在跑车的途中突然卡住计算梯度了。
             if agent.counter >= 2000:
+                print(f"  🔄 经验池满 2000 步，AI 正在进行深度网络反向传播，请稍候...", end="")
                 last_a_loss, last_c_loss = agent.update()
+                print(f" 完毕! (A-Loss: {last_a_loss:.4f}, C-Loss: {last_c_loss:.4f})")
 
             history_scores.append(ep_reward)
             avg_score = np.mean(history_scores[-20:]) if history_scores else 0

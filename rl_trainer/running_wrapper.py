@@ -6,10 +6,12 @@ class RunningEnvWrapper:
         self.env = env
         self.n_player = env.agent_num
         self.step_cnt = 0
+        self.agent_finished = [False, False]
 
     def reset(self):
         obs = self.env.reset()
         self.step_cnt = 0
+        self.agent_finished = [False, False]
         return self._process_obs(obs)
 
     def _process_obs(self, obs_list):
@@ -47,31 +49,34 @@ class RunningEnvWrapper:
         # Dense Reward Shaping
         shaped_reward = list(reward)
         
-        # We peek at the core engine
         core = self.env 
         
-        if not done:
-            for i in range(self.n_player):
-                agent = core.agent_list[i]
-                if not agent.finished:
-                    # 1. Time Penalty (encourage moving fast)
-                    shaped_reward[i] -= 0.01
-                    
-                    # 2. Velocity Reward (encourage maintaining momentum)
-                    vel = core.agent_v[i]
-                    speed = math.hypot(vel[0], vel[1])
-                    shaped_reward[i] += (speed / core.speed_cap) * 0.02
-                    
-                    # 3. Stuck Penalty
-                    if speed < 1.0:
-                        shaped_reward[i] -= 0.05
-        else:
-            # Distribute huge final win/loss signals to overshadow local rewards
-            winner = core.check_win() # returns '0', '1' or '-1'
-            if winner != '-1':
-                win_idx = int(winner)
-                shaped_reward[win_idx] += 100.0
-                shaped_reward[1-win_idx] -= 50.0
+        for i in range(self.n_player):
+            agent = core.agent_list[i]
+            
+            # === 【核心修复: 即时终点奖惩】 ===
+            # 如果这名特工在这一步【刚刚】越过终点线
+            if not self.agent_finished[i] and agent.finished:
+                self.agent_finished[i] = True
+                
+                # 如果对方还没过线，说明我是第一名！(大奖 +100，对方被立即嘲讽 -50)
+                if not self.agent_finished[1-i]:
+                    shaped_reward[i] += 100.0
+                    shaped_reward[1-i] -= 50.0
+                # 如果对方已经过线，说明是我输了，但不在这里重复扣分（因为当时自己已经被扣过了）
+
+            if not agent.finished:
+                # 1. Time Penalty (encourage moving fast)
+                shaped_reward[i] -= 0.01
+                
+                # 2. Velocity Reward (encourage maintaining momentum)
+                vel = core.agent_v[i]
+                speed = math.hypot(vel[0], vel[1])
+                shaped_reward[i] += (speed / core.speed_cap) * 0.02
+                
+                # 3. Stuck Penalty
+                if speed < 1.0:
+                    shaped_reward[i] -= 0.05
 
         self.step_cnt += 1
         return self._process_obs(obs), shaped_reward, done, info

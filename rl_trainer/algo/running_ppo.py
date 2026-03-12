@@ -58,53 +58,65 @@ class RunningPPO:
         if len(self.buffer) < args.batch_size:
             return 0, 0
             
-        state = torch.tensor(np.array([t.state for t in self.buffer]), dtype=torch.float).to(args.device)
-        action = torch.tensor([t.action for t in self.buffer], dtype=torch.long).view(-1, 1).to(args.device)
-        old_action_log_prob = torch.tensor([t.a_log_prob for t in self.buffer], dtype=torch.float).view(-1, 1).to(args.device)
-        rewards = [t.reward for t in self.buffer]
+        states = torch.tensor(np.array([t.state for t in self.buffer]), dtype=torch.float).to(args.device)
+        actions = torch.tensor([t.action for t in self.buffer], dtype=torch.long).view(-1, 1).to(args.device)
+        old_action_log_probs = torch.tensor([t.a_log_prob for t in self.buffer], dtype=torch.float).view(-1, 1).to(args.device)
+        # 【重要修复1：Reward缩放】将巨大的100分奖励缩小10倍，稳定Critic均方误差爆炸。
+        rewards = [t.reward * 0.1 for t in self.buffer]
         dones = [t.done for t in self.buffer]
 
-        # 【核心修复 1: 打破局数污染】计算 Return (Gt) 时如果遇到本局结束(d=True)，则收益清零阻断。
-        R = 0
-        Gt = []
-        for r, d in zip(rewards[::-1], dones[::-1]):
-            if d:
-                R = 0
-            R = r + args.gamma * R
-            Gt.insert(0, R)
-        Gt = torch.tensor(Gt, dtype=torch.float).to(args.device).view(-1, 1)
+        # 【重要修复2：采用 GAE (Generalized Advantage Estimation)】打通3000步的奖励长梯！
+        with torch.no_grad():
+            values = self.critic_net(states).view(-1).cpu().numpy()
+
+        gae = 0
+        advantages = []
+        lmbda = 0.95
+        for step in reversed(range(len(self.buffer))):
+            if step == len(self.buffer) - 1:
+                next_non_terminal = 1.0 - dones[step]
+                next_value = 0.0
+            else:
+                next_non_terminal = 1.0 - dones[step]
+                next_value = values[step + 1]
+            
+            delta = rewards[step] + args.gamma * next_value * next_non_terminal - values[step]
+            gae = delta + args.gamma * lmbda * next_non_terminal * gae
+            advantages.insert(0, gae)
+            
+        advantages = torch.tensor(advantages, dtype=torch.float).to(args.device).view(-1, 1)
+        returns = advantages + torch.tensor(values, dtype=torch.float).to(args.device).view(-1, 1)
+
+        # 【重要修复3：全局势能归一化】在全样本上归一化，而不是在 MiniBatch 上，消除抽样偏差
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         a_loss_sum, c_loss_sum = 0, 0
         update_cnt = 0
 
         for _ in range(args.ppo_update_time):
             for index in BatchSampler(SubsetRandomSampler(range(len(self.buffer))), args.batch_size, False):
-                # Critic Update
-                V = self.critic_net(state[index])
-                advantage = (Gt[index] - V).detach()
                 
-                # 【核心修复 2: 梯度归一化】极大稳定 PPO 的剧烈震荡，防止“水平突然下降”
-                advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+                # Critic Update
+                V = self.critic_net(states[index])
+                value_loss = F.mse_loss(returns[index], V)
                 
                 # Actor Update
-                action_prob = self.actor_net(state[index])
+                action_prob = self.actor_net(states[index])
                 dist = Categorical(action_prob)
-                action_log_prob = dist.log_prob(action[index].squeeze()).view(-1, 1)
+                action_log_prob = dist.log_prob(actions[index].squeeze()).view(-1, 1)
                 entropy = dist.entropy().mean()
                 
-                ratio = torch.exp(action_log_prob - old_action_log_prob[index])
-                surr1 = ratio * advantage
-                surr2 = torch.clamp(ratio, 1 - args.clip_param, 1 + args.clip_param) * advantage
+                ratio = torch.exp(action_log_prob - old_action_log_probs[index])
+                surr1 = ratio * advantages[index]
+                surr2 = torch.clamp(ratio, 1 - args.clip_param, 1 + args.clip_param) * advantages[index]
                 
                 # Add entropy bonus to encourage exploration
                 action_loss = -torch.min(surr1, surr2).mean() - 0.01 * entropy
                 
                 self.actor_optimizer.zero_grad()
                 action_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_net.parameters(), args.max_grad_norm)
                 self.actor_optimizer.step()
 
-                value_loss = F.mse_loss(Gt[index], V)
                 self.critic_optimizer.zero_grad()
                 value_loss.backward()
                 nn.utils.clip_grad_norm_(self.critic_net.parameters(), args.max_grad_norm)

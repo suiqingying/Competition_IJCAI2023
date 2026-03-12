@@ -28,12 +28,12 @@ conda init powershell
 
 ### 2.2 运行本地测试评测
 ```bash
-conda run -n olympics python run_log.py --my_ai "smart" --opponent "random"
+conda run --no-capture-output -n olympics python run_log.py --my_ai "smart" --opponent "random"
 ```
 
 ### 2.3 UI 可视化展示
 ```bash
-conda run -n olympics python olympics_engine/main.py
+conda run --no-capture-output -n olympics python olympics_engine/main.py
 ```
 
 ## 3. RL PPO 训练与评估指南
@@ -43,7 +43,7 @@ conda run -n olympics python olympics_engine/main.py
 ### 3.1 启动训练 (带 OSD 可视化大屏)
 在配置好环境依赖后，运行以下命令可以直观地看到 PPO 正在自我进化，训练参数会在界面的左上角实时跳动展示：
 ```bash
-conda run -n olympics python rl_trainer/train_running.py --render
+conda run --no-capture-output -n olympics python rl_trainer/train_running.py --render
 ```
 - **基于 Loss 的自动收敛停止机制**：程序移除了写死的回合数上限。加入了独立的泛化验证逻辑。默认情况下，当它完成了全部进阶训练课表，并且能够**稳定保持 C-Loss < 0.015** 超过连续 5 局时，它会宣布自动出师并保存退出。你也可以通过 `--target_c_loss 0.02` 参数来手动控制更宽容的收敛上限。
 - 模型文件会自动并定时保存在 `rl_trainer/models/running_ppo/` 目录下。
