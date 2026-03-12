@@ -1,0 +1,77 @@
+import numpy as np
+import math
+
+class RunningEnvWrapper:
+    def __init__(self, env):
+        self.env = env
+        self.n_player = env.agent_num
+        self.step_cnt = 0
+
+    def reset(self):
+        obs = self.env.reset()
+        self.step_cnt = 0
+        return self._process_obs(obs)
+
+    def _process_obs(self, obs_list):
+        """
+        Convert the 40x40 discrete colored grid into a 3-channel (3, 40, 40) float tensor.
+        Channel 0: Walls & Tracks (Index 6=Black, 4=Grey)
+        Channel 1: Finish Line (Index 7=Red)
+        Channel 2: Other Agents & Objects (Index 8, 10, 2, 3, etc)
+        """
+        processed = []
+        for i in range(self.n_player):
+            # Compatibility check depending on whether it's dict observation
+            if isinstance(obs_list[i], dict):
+                matrix = obs_list[i].get('obs', obs_list[i].get('agent_obs'))
+                if isinstance(matrix, dict):
+                    matrix = matrix.get('agent_obs', matrix)
+            else:
+                matrix = obs_list[i]
+                
+            matrix = np.array(matrix)
+            
+            # Create Multi-channel One-hot features
+            ch0 = ((matrix == 6) | (matrix == 4) | (matrix == 1)).astype(np.float32)
+            ch1 = (matrix == 7).astype(np.float32)
+            ch2 = ((matrix == 8) | (matrix == 10) | (matrix == 2) | (matrix == 3) | (matrix == 5)).astype(np.float32)
+            
+            stacked = np.stack([ch0, ch1, ch2], axis=0) # Size: (3, 40, 40)
+            processed.append(stacked)
+        return processed
+
+    def step(self, action_list):
+        # Step through the real env
+        obs, reward, done, info = self.env.step(action_list)
+        
+        # Dense Reward Shaping
+        shaped_reward = list(reward)
+        
+        # We peek at the core engine
+        core = self.env 
+        
+        if not done:
+            for i in range(self.n_player):
+                agent = core.agent_list[i]
+                if not agent.finished:
+                    # 1. Time Penalty (encourage moving fast)
+                    shaped_reward[i] -= 0.01
+                    
+                    # 2. Velocity Reward (encourage maintaining momentum)
+                    vel = core.agent_v[i]
+                    speed = math.hypot(vel[0], vel[1])
+                    shaped_reward[i] += (speed / core.speed_cap) * 0.02
+                    
+                    # 3. Stuck Penalty
+                    if speed < 1.0:
+                        shaped_reward[i] -= 0.05
+        else:
+            # Distribute huge final win/loss signals to overshadow local rewards
+            winner = core.check_win() # returns '0', '1' or '-1'
+            if winner != '-1':
+                win_idx = int(winner)
+                shaped_reward[win_idx] += 100.0
+                shaped_reward[1-win_idx] -= 50.0
+
+        self.step_cnt += 1
+        return self._process_obs(obs), shaped_reward, done, info
